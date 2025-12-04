@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>Sistem Informasi Pertanahan</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    .info-box {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      padding: 8px 12px;
+      background: white;
+      z-index: 1000;
+      border-radius: 4px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      max-width: 260px;
+    }
+
+    .info-box hr {
+      margin: 6px 0;
+      border: none;
+      border-top: 1px solid #ddd;
+    }
+
+    /* Legenda */
+    .legend {
+      background: white;
+      padding: 8px 10px;
+      border-radius: 4px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .legend h4 {
+      margin: 0 0 4px 0;
+      font-size: 12px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 3px;
+    }
+    .legend-swatch {
+      width: 16px;
+      height: 10px;
+      margin-right: 6px;
+      border: 1px solid #333;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="info-box">
+    <strong>Sistem Informasi Pertanahan</strong><br>
+    Visualisasi bidang tanah dan lingkungan sekitarnya
+    <hr>
+    <div id="stats">
+      Memuat statistik...
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    // =========================
+    // Variabel statistik global
+    // =========================
+    let totalBidang = 0;
+    let totalLuas = 0;   // dalam m²
+    let countLuas = 0;
+    let totalJalan = 0;
+
+    function formatNumber(num) {
+      return num.toLocaleString('id-ID', { maximumFractionDigits: 2 });
+    }
+
+    function updateStats() {
+      const statsDiv = document.getElementById('stats');
+
+      const avgLuasM2 = countLuas > 0 ? (totalLuas / countLuas) : 0;
+      const totalLuasHa = totalLuas / 10000;       // konversi ke hektar
+      const avgLuasHa   = avgLuasM2 / 10000;      // konversi ke hektar
+
+      statsDiv.innerHTML =
+        'Jumlah bidang: ' + totalBidang + '<br>' +
+        (countLuas > 0
+          ? 'Total luas: ' + formatNumber(totalLuas) + ' m² (' + formatNumber(totalLuasHa) + ' ha)<br>'
+          : 'Total luas: -<br>') +
+        (countLuas > 0
+          ? 'Luas rata-rata: ' + formatNumber(avgLuasHa) + ' ha (' + formatNumber(avgLuasM2) + ' m²)<br>'
+          : 'Luas rata-rata: -<br>') +
+        'Jumlah jalan: ' + totalJalan;
+    }
+
+    // Inisialisasi peta
+    const map = L.map('map');
+
+    // =========================
+    // BASEMAPS (PETA DASAR)
+    // =========================
+
+    // 1. OpenStreetMap standar
+    const osmStandard = L.tileLayer(
+      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {
+        maxZoom: 22,
+        attribution: '&copy; OpenStreetMap contributors'
+      }
+    ).addTo(map); // ditampilkan pertama kali
+
+    // 2. OSM abu-abu (CARTO Positron)
+    const osmGray = L.tileLayer(
+      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      {
+        maxZoom: 22,
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      }
+    );
+
+    // 3. Citra satelit (Esri World Imagery)
+    const esriSat = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {
+        maxZoom: 22,
+        attribution:
+          'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, ' +
+          'Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+      }
+    );
+
+    // =========================
+    // OVERLAY: PERSIL (bidang tanah)
+    // =========================
+    const persilLayer = L.geoJSON(null, {
+      style: function (feature) {
+        return {
+          color: '#333333',
+          weight: 1,
+          fillColor: '#ffcc00',
+          fillOpacity: 0.5
+        };
+      },
+      onEachFeature: function (feature, layer) {
+        const props = feature.properties || {};
+
+        const kecamatan =
+          props.KECAMATAN || props.kecamatan || props.Kec || '-';
+
+        const kelurahan =
+          props.KELURAHAN || props.kelurahan || props.DESA || props.Desa || '-';
+
+        const tipeHak =
+          props.TIPE_HAK || props.TIPEHAK || props.JENIS_HAK || props.JENISHAK || '-';
+
+        const tahun =
+          props.TAHUN || props.THN || props.TAHUN_HAK || props.TAHUNTERBIT || '-';
+
+        const nib =
+          props.NIB || props.nib || '-';
+
+        // Pilih luas: LUASPETA / LUAS / Shape_Area
+        let luasRaw =
+          props.LUAS || props.LUASPETA || props.LUAS_PETA || props.Shape_Area || props.shape_area;
+
+        let luas = '-';
+        let luasNum = null;
+
+        if (luasRaw !== undefined && luasRaw !== null && luasRaw !== '') {
+          const num = Number(
+            typeof luasRaw === 'string' ? luasRaw.replace(',', '.') : luasRaw
+          );
+          if (!Number.isNaN(num)) {
+            luasNum = num;              // dalam m²
+            luas = formatNumber(num);
+          } else {
+            luas = luasRaw;
+          }
+        }
+
+        // Update statistik bidang & luas
+        totalBidang += 1;
+        if (luasNum !== null) {
+          totalLuas += luasNum;
+          countLuas += 1;
+        }
+
+        // Nama pemilik – field atribut "Pemilik" + beberapa fallback
+        const namaPemilik =
+          props.Pemilik ||
+          props.PEMILIK ||
+          props.pemilik ||
+          props.NAMA_PEMILIK ||
+          props.NAMAPEMILIK ||
+          props.NM_PEMILIK ||
+          props.NMPEMILIK ||
+          props.NAMA ||
+          '-';
+
+        const penggunaan =
+          props.PENGGUNAAN || props.PERUNTUKAN || props.FUNGSI || '-';
+
+        // URUTAN POPUP
+        let popupContent = '<b>Informasi Bidang Tanah</b><br>';
+        popupContent += 'Nama Pemilik : ' + namaPemilik + '<br>';
+        popupContent += 'NIB : ' + nib + '<br>';
+        popupContent += 'Tahun : ' + tahun + '<br>';
+        popupContent += 'Luas : ' + luas + ' m²<br>';
+        popupContent += 'Kecamatan : ' + kecamatan + '<br>';
+        popupContent += 'Kelurahan : ' + kelurahan + '<br>';
+        popupContent += 'Penggunaan : ' + penggunaan + '<br>';
+        popupContent += 'Tipe Hak : ' + tipeHak;
+
+        layer.bindPopup(popupContent);
+
+        layer.on({
+          mouseover: function (e) {
+            const l = e.target;
+            l.setStyle({
+              weight: 3,
+              fillOpacity: 0.8
+            });
+          },
+          mouseout: function (e) {
+            persilLayer.resetStyle(e.target);
+          },
+          click: function (e) {
+            map.fitBounds(e.target.getBounds());
+          }
+        });
+      }
+    }).addTo(map);
+
+    // Load data persil
+    fetch('data/PersilUnduh_FeaturesToJSON.geojson')
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Tidak bisa memuat PersilUnduh_FeaturesToJSON.geojson');
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        persilLayer.addData(data);
+        if (persilLayer.getLayers().length > 0) {
+          map.fitBounds(persilLayer.getBounds());
+        }
+        updateStats(); // perbarui statistik setelah persil masuk
+      })
+      .catch(function (error) {
+        console.error(error);
+        alert(
+          'Gagal memuat data PersilUnduh_FeaturesToJSON.geojson. Periksa nama file & folder "data".'
+        );
+      });
+
+    // =========================
+    // 2. Layer JALAN
+    // =========================
+    const jalanLayer = L.geoJSON(null, {
+      style: function (feature) {
+        return {
+          color: '#000000',
+          weight: 2
+        };
+      }
+    });
+
+    fetch('data/Jalan_FeaturesToJSON.geojson')
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Tidak bisa memuat Jalan_FeaturesToJSON.geojson');
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        jalanLayer.addData(data);
+        totalJalan = jalanLayer.getLayers().length;
+        updateStats(); // perbarui statistik setelah jalan masuk
+      })
+      .catch(function (error) {
+        console.error(error);
+        alert('Gagal memuat data Jalan_FeaturesToJSON.geojson.');
+      });
+
+    // =========================
+    // 3. Layer SELOKAN
+    // =========================
+    const selokanLayer = L.geoJSON(null, {
+      style: function (feature) {
+        return {
+          color: '#0000ff',
+          weight: 1.5
+        };
+      }
+    });
+
+    fetch('data/Selokan_FeaturesToJSON.geojson')
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Tidak bisa memuat Selokan_FeaturesToJSON.geojson');
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        selokanLayer.addData(data);
+      })
+      .catch(function (error) {
+        console.error(error);
+        alert('Gagal memuat data Selokan_FeaturesToJSON.geojson.');
+      });
+
+    // =========================
+    // 4. Layer LAHAN KOSONG
+    // =========================
+    const lahankosongLayer = L.geoJSON(null, {
+      style: function (feature) {
+        return {
+          color: '#008000',
+          weight: 1,
+          fillColor: '#00ff00',
+          fillOpacity: 0.4
+        };
+      }
+    });
+
+    fetch('data/Lahankosong_FeaturesToJSON.geojson')
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Tidak bisa memuat Lahankosong_FeaturesToJSON.geojson');
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        lahankosongLayer.addData(data);
+      })
+      .catch(function (error) {
+        console.error(error);
+        alert('Gagal memuat data Lahankosong_FeaturesToJSON.geojson.');
+      });
+
+    // =========================
+    // 5. Layer BATAS
+    // =========================
+    const batasLayer = L.geoJSON(null, {
+      style: function (feature) {
+        return {
+          color: '#ff0000',
+          weight: 2,
+          fillOpacity: 0
+        };
+      }
+    });
+
+    fetch('data/BATAS_FeaturesToJSON.geojson')
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error('Tidak bisa memuat BATAS_FeaturesToJSON.geojson');
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        batasLayer.addData(data);
+      })
+      .catch(function (error) {
+        console.error(error);
+        alert('Gagal memuat data BATAS_FeaturesToJSON.geojson.');
+      });
+
+    // =========================
+    // 6. Layer control (toggle on/off)
+    // =========================
+    const baseMaps = {
+      'OSM Standar': osmStandard,
+      'OSM Abu-abu (CARTO)': osmGray,
+      'Citra Satelit (Esri)': esriSat
+    };
+
+    const overlayMaps = {
+      'Persil / Bidang Tanah': persilLayer,
+      'Jalan': jalanLayer,
+      'Selokan': selokanLayer,
+      'Lahan Kosong': lahankosongLayer,
+      'Batas': batasLayer
+    };
+
+    L.control.layers(baseMaps, overlayMaps, { collapsed: false }).addTo(map);
+
+    // =========================
+    // 7. LEGENDA
+    // =========================
+    const legend = L.control({ position: 'bottomright' });
+
+    legend.onAdd = function (map) {
+      const div = L.DomUtil.create('div', 'legend');
+
+      div.innerHTML =
+        '<h4>Legenda</h4>' +
+        '<div class="legend-item">' +
+          '<div class="legend-swatch" style="background:#ffcc00;"></div>' +
+          '<span>Persil / Bidang Tanah</span>' +
+        '</div>' +
+        '<div class="legend-item">' +
+          '<div class="legend-swatch" style="background:#000000;"></div>' +
+          '<span>Jalan</span>' +
+        '</div>' +
+        '<div class="legend-item">' +
+          '<div class="legend-swatch" style="background:#0000ff;"></div>' +
+          '<span>Selokan</span>' +
+        '</div>' +
+        '<div class="legend-item">' +
+          '<div class="legend-swatch" style="background:#00ff00;"></div>' +
+          '<span>Lahan Kosong</span>' +
+        '</div>' +
+        '<div class="legend-item">' +
+          '<div class="legend-swatch" style="background:#ffffff; border:2px solid #ff0000;"></div>' +
+          '<span>Batas</span>' +
+        '</div>';
+
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+
+    legend.addTo(map);
+  </script>
+</body>
+</html>
